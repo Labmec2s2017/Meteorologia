@@ -1,0 +1,171 @@
+/*
+ This Arduino sketch controls a personal weather station and uses a GSM shield to upload data to wunderground.com.
+ For updates check https://github.com/camueller/WeatherStation-Wunderground-GSM
+ */
+#include <SoftwareSerial.h>
+#include <String.h>
+SoftwareSerial Sim900Serial(7, 8);//Configarión de los pines serial por software
+
+//////////////
+// Variables
+//////////////
+#include <TimeLib.h>
+#include <avr/wdt.h>   //libreria wachdog para el autoreset del arduino
+const unsigned long RAIN_INTERVAL_SECONDS                   = 60;//300;   segundos
+const          int  RAIN_INTERVALS                          = 1;//un minuto 12; // 12 * 5min = 60 min
+unsigned       int  rainSignalCountInterval[RAIN_INTERVALS];
+unsigned       int  rainSignalCountIntervalIndex; //contador
+volatile       int  rainSignalCount;     //contador
+unsigned       long rainIntervalBegin;
+               boolean rainTodayReset = false; //variable falso
+float rainToday;       //variable lluvia del dia
+unsigned int hourOfDay = -1;
+float rainLastHour;    //variable lluvia de ultima hora
+//////////////
+// Set up
+//////////////
+
+void setup(){//setupRain(unsigned long now) {
+  Sim900Serial.begin(19200);//Arduino se comunica con el SIM900 a una velocidad de 19200bps   
+  Serial.begin(19200);
+  attachInterrupt(0, rainSignal, RISING);//(rainInterrupt, rainSignal, RISING);
+  rainSignalCount = 0;            //inicializar contador en cero
+  rainSignalCountIntervalIndex = 0; //inicializar contador en cero
+  memset(rainSignalCountInterval, 0, sizeof(rainSignalCountInterval));//memset borra el contenido del array  "rainSignalCountInterval" desde la posición 0 hasta el final sizeof
+  rainIntervalBegin = now;
+  rainToday = 0;  //inicializar el valor de lluvia diaria en cero
+
+}
+
+//////////////
+// Loop
+//////////////
+
+void loop(){//loopRain(unsigned long now) {
+comandosAT();//Llama a la función comandosAT  
+if(Sim900Serial.available())//Verificamos si hay datos disponibles desde el SIM900
+Serial.write(Sim900Serial.read());//Escribir datos
+
+//#ifdef DEBUG_WS  
+    Serial.print(F("rainSignalCount="));
+    Serial.print(rainSignalCount/4); //dividor por 4 para tener la cuenta correcta ya que se produce el fenomeno de rebote en el reeed swicth ,probar poner un capacitor
+    Serial.print(F(" rainSignalCountIntervalIndex="));
+    Serial.println(rainSignalCountIntervalIndex);
+//#endif
+  unsigned long now = currentMillis();  //inicializa contador ahora
+  // calculate rain in interval
+  boolean intervalIndexReset = false;
+  if(now - rainIntervalBegin > 1000 * RAIN_INTERVAL_SECONDS || rainIntervalBegin > now) {
+    rainSignalCountInterval[rainSignalCountIntervalIndex] = rainSignalCount;
+    rainSignalCount = 0;
+    rainIntervalBegin = now; //tiempo
+    
+//#ifdef DEBUG_WS  
+    for(int i=0;i<RAIN_INTERVALS;i++) {
+      Serial.print(F("rainSignalCountInterval["));
+      Serial.print(i);
+      Serial.print(F("]="));
+      Serial.println(rainSignalCountInterval[i]);
+    }
+//#endif
+
+    rainSignalCountIntervalIndex += 1;
+    if(rainSignalCountIntervalIndex >= RAIN_INTERVALS) {
+      rainSignalCountIntervalIndex = 0;
+      intervalIndexReset = true;
+    }
+  }  
+
+  // calculate rain total of all intervals
+  int rainSignalCountTotal = 0;
+  for(int i=0;i<RAIN_INTERVALS;i++) {
+    rainSignalCountTotal += rainSignalCountInterval[i];
+  }
+  rainLastHour = rainSignalCountTotal *0.25/4.75; //0.2794; //multiplico x 0.25 que es la capacidad de la cuchara divido entre 4.75 que es el valor de calibracion en 1 min 
+
+  // calculate rainfall today  
+  if(hourOfDay == 0) {
+    // during summer time this is 1AM rather than midnight since time is GMT
+    if(! rainTodayReset) {
+      // reset once per day
+      rainTodayReset = true;
+      rainToday = rainLastHour; 
+    }
+  }
+  else {
+    // it's later than 1AM now - allow for reset the next time a new day begins
+    rainTodayReset = false;
+  }
+  if(intervalIndexReset) {
+    rainToday += rainLastHour;
+  }
+
+//#ifdef INFO_WS
+  Serial.print(F("Rainfall ("));
+  Serial.print(RAIN_INTERVAL_SECONDS * RAIN_INTERVALS);
+  Serial.print(F("s): "));
+  Serial.print(rainLastHour);
+  Serial.println(F(" mm"));
+
+  Serial.print(F("Rainfall today: "));
+  Serial.print(rainToday);
+  Serial.println(F(" mm"));
+//#endif
+}
+
+//////////////
+// Functions
+//////////////
+long currentMillis() {
+#ifdef DEBUG_WS  
+  return MAX_LONG - 10000 + millis();
+#endif  
+  return millis();
+}
+
+void rainSignal() {
+  rainSignalCount++;
+}
+
+void comandosAT(){
+Sim900Serial.println("AT+CIPSTATUS");//Consultar el estado actual de la conexión
+delay(2000);
+Sim900Serial.println("AT+CIPMUX=0");//comando configura el dispositivo para una conexión IP única o múltiple 0=única
+delay(3000);
+mostrarDatosSeriales();
+Sim900Serial.println("AT+CSTT=\"internet\",\"\",\"\"");//comando configura el APN, nombre de usuario y contraseña."gprs.movistar.com.ar","wap","wap"->Movistar Arg.
+delay(1000);
+mostrarDatosSeriales();
+Sim900Serial.println("AT+CIICR");//REALIZAR UNA CONEXIÓN INALÁMBRICA CON GPRS O CSD
+delay(3000);
+mostrarDatosSeriales();
+Sim900Serial.println("AT+CIFSR");// Obtenemos nuestra IP local
+delay(2000);
+mostrarDatosSeriales();
+Sim900Serial.println("AT+CIPSPRT=0");//Establece un indicador '>' al enviar datos
+//grados();
+delay(3000);
+mostrarDatosSeriales();
+Sim900Serial.println("AT+CIPSTART=\"TCP\",\"api.thingspeak.com\",\"80\"");//Indicamos el tipo de conexión, url o dirección IP y puerto al que realizamos la conexión
+delay(6000);
+mostrarDatosSeriales();
+Sim900Serial.println("AT+CIPSEND");//ENVÍA DATOS A TRAVÉS DE una CONEXIÓN TCP O UDP
+delay(4000);
+mostrarDatosSeriales();
+String datos="GET https://api.thingspeak.com/update?api_key=GBRJG7LF80GUT9V4&field1=0" + String(rainLastHour);//temperatura);
+Sim900Serial.println(datos);//Envía datos al servidor remoto
+delay(4000);
+mostrarDatosSeriales();
+Sim900Serial.println((char)26);
+delay(5000);//Ahora esperaremos una respuesta pero esto va a depender de las condiones de la red y este valor quizá debamos modificarlo dependiendo de las condiciones de la red
+Sim900Serial.println();
+mostrarDatosSeriales();
+Sim900Serial.println("AT+CIPSHUT");//Cierra la conexión(Desactiva el contexto GPRS PDP)
+delay(5000);
+mostrarDatosSeriales();
+} 
+void mostrarDatosSeriales()//Muestra los datos que va entregando el sim900
+{
+while(Sim900Serial.available()!=0)
+Serial.write(Sim900Serial.read());
+}
